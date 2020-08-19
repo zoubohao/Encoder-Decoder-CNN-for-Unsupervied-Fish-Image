@@ -168,6 +168,40 @@ class SeparableConvBlock(nn.Module):
             x = self.swish(x)
         return x
 
+class Bottleneck(nn.Module):
+
+    def __init__(self, inChannels, outChannels, stride=1):
+        super(Bottleneck, self).__init__()
+        self.conv1 = nn.Conv2d(inChannels, outChannels, kernel_size=1)
+        self.bn1 = nn.BatchNorm2d(outChannels, eps=1e-3, momentum= 1- 0.99)
+        self.conv2 = nn.Conv2d(outChannels, outChannels,kernel_size=3, stride = stride, groups = outChannels, padding=1)
+        self.bn2 = nn.BatchNorm2d(outChannels ,eps=1e-3, momentum= 1- 0.99)
+        self.conv3 = nn.Conv2d(outChannels, outChannels, kernel_size=1)
+        self.bn3 = nn.BatchNorm2d(outChannels)
+        self.relu1 = MemoryEfficientSwish()
+        self.relu2 = MemoryEfficientSwish()
+        self.downSample = nn.Sequential(nn.Conv2d(inChannels, outChannels, kernel_size=3, stride=stride, padding=1),
+                                        nn.BatchNorm2d(outChannels,eps=1e-3, momentum= 1- 0.99),
+                                        MemoryEfficientSwish())
+
+    def forward(self, x):
+        identity = self.downSample(x)
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu1(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu2(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        out += identity
+
+        return out
+
 
 ######################################
 ######### Activation Modules #########
@@ -230,65 +264,6 @@ class SE(nn.Module):
         dense1 = self.act((self.dense1(globalPooling)))
         dense2 = self.dense2(dense1)
         return torch.sigmoid(dense2)
-
-class PixelAttention(nn.Module):
-
-    def __init__(self, embedding_dim, num_heads, drop_rate, down_sample_size = 2):
-        super(PixelAttention, self).__init__()
-        self.transformer = nn.TransformerEncoderLayer(d_model=embedding_dim, nhead=num_heads, dim_feedforward=512,
-                                                      dropout=drop_rate)
-        self.downSampleSize = down_sample_size
-        if self.downSampleSize != 0:
-            if self.downSampleSize > 1:
-                downLayers = []
-                for _ in range(down_sample_size - 1):
-                    downLayers.append(
-                        SeparableConvBlock(embedding_dim, embedding_dim, stride=2, norm=True, activation=True))
-                self.downSample = nn.Sequential(*downLayers)
-            self.finalDownSample = SeparableConvBlock(embedding_dim, embedding_dim, stride=2, norm=True, activation=True)
-            #### Up sample
-            self.secondUpSample = nn.Sequential(nn.UpsamplingBilinear2d(scale_factor=2),
-                                              SeparableConvBlock(embedding_dim, embedding_dim, stride=1, norm=True,
-                                                                 activation=False))
-            if self.downSampleSize > 1:
-                upLayers = []
-                for _ in range(down_sample_size - 1):
-                    upLayers.append(nn.Sequential(nn.UpsamplingBilinear2d(scale_factor=2),
-                                                  SeparableConvBlock(embedding_dim, embedding_dim, stride=1, norm=True,
-                                                                     activation=False)))
-                self.upSample = nn.Sequential(*upLayers)
-        self.maskGene = SeparableConvBlock(embedding_dim, embedding_dim, stride=1, norm=True, activation=False)
-
-    def forward(self, x):
-        """
-        :param x: shape of x is [B, C, H, W]
-        :return: A weight mask for x
-        """
-        secondDownTensor = None
-        if self.downSampleSize != 0:
-            if self.downSampleSize > 1:
-                secondDownTensor = self.downSample(x)
-                finalDownTensor = self.finalDownSample(secondDownTensor)
-            else:
-                finalDownTensor = self.finalDownSample(x)
-        else:
-            finalDownTensor = x.clone()
-        #####
-        b, c, h, w = finalDownTensor.shape
-        mediumTensor = torch.reshape(finalDownTensor, [b, h * w, c])
-        mediumTensor = self.transformer(mediumTensor)
-        mediumTensor = torch.reshape(mediumTensor, [b, c, h, w])
-        #####
-
-        if self.downSampleSize != 0:
-            if self.downSampleSize > 1:
-                secondUpTensor = self.secondUpSample(mediumTensor)
-                finalOutTensor = self.upSample(secondUpTensor + secondDownTensor)
-            else:
-                finalOutTensor = self.secondUpSample(mediumTensor)
-        else:
-            finalOutTensor = mediumTensor.clone()
-        return torch.sigmoid(self.maskGene(finalOutTensor))
 
 
 #######################

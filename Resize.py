@@ -2,13 +2,14 @@ import os
 import cv2
 
 if __name__ == "__main__":
-    imagesName = list(os.listdir("./Imaging_Experiment_Ori"))
-    print(imagesName)
+    inputDir = "./Testing"
+    outputDir = "./ImagesResizeTest"
+    imagesName = list(os.listdir(inputDir))
     for name in imagesName:
-        img = cv2.resize(cv2.imread("./Imaging_Experiment_Ori/" + name), dsize=(512, 128))
+        img = cv2.resize(cv2.imread(os.path.join(inputDir, name)), dsize=(512, 128))
         print(img.shape)
-        print("./ImagesResize/" + name.split(".tif")[0] + ".jpg")
-        cv2.imwrite("./ImagesResize/" + name.split(".tif")[0] + ".jpg", img)
+        print(outputDir + name.split(".tif")[0] + ".jpg")
+        cv2.imwrite(os.path.join(outputDir , name.split(".tif")[0] + ".jpg"), img)
 
 
 
