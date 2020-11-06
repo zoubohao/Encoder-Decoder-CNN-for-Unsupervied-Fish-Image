@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from Model.PretrainedModel import resnet18_pre_trained
+import numpy as np
 
 
 class HuberLoss(nn.Module):
@@ -36,5 +37,34 @@ class PerceptionLoss(nn.Module):
         loss = F.mse_loss(perInput, perTarget, reduction="mean")
         return loss
 
+class BCELogitsWeightLoss(nn.Module):
 
+    def __init__(self, threshold = 180., fixed_basic_coefficient = 1.2):
+        super(BCELogitsWeightLoss, self).__init__()
+        self.bceLogitsLoss = nn.BCEWithLogitsLoss(reduction="none")
+        self.threshold = threshold / 255.
+        self.fixed = fixed_basic_coefficient
 
+    def forward(self, inputs, targets):
+        with torch.no_grad():
+            meanTargets = torch.mean(targets, dim=1, keepdim=True)
+            #print(meanTargets)
+            whiteMask = (self.threshold <= meanTargets).float()
+            blackMask = 1. - whiteMask
+            #print(whiteMask)
+            #print(blackMask)
+            totalPixelsNum = np.prod(targets.shape)
+            whiteWeight = torch.sum(whiteMask) / totalPixelsNum
+            blackWeight = torch.sum(blackMask) / totalPixelsNum
+        whitePixelsLoss = self.bceLogitsLoss(inputs, targets) * whiteMask * (blackWeight / whiteWeight)
+        blackPixelsLoss = self.bceLogitsLoss(inputs, targets) * blackMask * self.fixed
+        #print("white loss {}".format(torch.mean(whitePixelsLoss)))
+        #print("black loss {}".format(torch.mean(blackPixelsLoss)))
+        addLoss = whitePixelsLoss + blackPixelsLoss
+        return torch.mean(addLoss)
+
+if __name__ == "__main__":
+    testLoss = BCELogitsWeightLoss()
+    testInput = torch.rand(size=[5, 3, 128, 512])
+    testTarget = torch.rand(size=[5, 3, 128, 512])
+    print(testLoss(testInput, testTarget))

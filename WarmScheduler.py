@@ -1,6 +1,4 @@
 from torch.optim.lr_scheduler import _LRScheduler
-import torch
-import matplotlib.pyplot as plt
 
 class GradualWarmupScheduler(_LRScheduler):
     def __init__(self, optimizer, multiplier, total_epoch, after_scheduler=None):
@@ -8,6 +6,8 @@ class GradualWarmupScheduler(_LRScheduler):
         self.total_epoch = total_epoch
         self.after_scheduler = after_scheduler
         self.finished = False
+        self.last_epoch = None
+        self.base_lrs = None
         super().__init__(optimizer)
 
     def get_lr(self):
@@ -18,7 +18,6 @@ class GradualWarmupScheduler(_LRScheduler):
                     self.finished = True
                 return self.after_scheduler.get_lr()
             return [base_lr * self.multiplier for base_lr in self.base_lrs]
-
         return [base_lr * ((self.multiplier - 1.) * self.last_epoch / self.total_epoch + 1.) for base_lr in self.base_lrs]
 
 

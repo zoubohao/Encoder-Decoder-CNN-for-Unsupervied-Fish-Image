@@ -1,50 +1,85 @@
 import torch
 import torch.nn as nn
+from Model.BigGANLayers import GBlock
 from Tools import Bottleneck
-
-
-class UpSampling(nn.Module):
-
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding):
-        super(UpSampling, self).__init__()
-        self.transpose = nn.Sequential(nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=False),
-                                       nn.BatchNorm2d(out_channels, eps=1e-3, momentum=0.01))
-        self.block = nn.Sequential(Bottleneck(out_channels, out_channels, stride=1),
-                                   Bottleneck(out_channels, out_channels, stride=1))
-
-    def forward(self,x):
-        x = self.transpose(x)
-        return self.block(x)
-
+from Model.EncoderNet import ConvBlock
+from Tools import DeformConv2d
 
 class Decoder (nn.Module):
 
-    def __init__(self, encoderChannels, channelsExpandRatio):
+    def __init__(self, encodedDimension,ch = 8, if_add_plate_infor = True, encoderImgHeight = 12, encoderImgWidth = 52):
 
         super(Decoder, self).__init__()
-        self.channels = int(64 * channelsExpandRatio)
-        self.upChannels = nn.Sequential(nn.Linear(encoderChannels, int(64 * channelsExpandRatio) * 8 * 32),
-                                        nn.BatchNorm1d(int(64 * channelsExpandRatio) * 8 * 32))
+        self.emcodedDimension = encodedDimension
+        self.channels = 16 * ch
+        self.encoderHeight = encoderImgHeight
+        self.encoderWidth = encoderImgWidth
+        if if_add_plate_infor:
+            ## the embedding size is emcodedDimension
+            self.embeddingPlate = nn.Sequential(nn.Linear(1, encodedDimension // 2, bias=True),
+                                                nn.BatchNorm1d(encodedDimension // 2),
+                                                nn.Linear(encodedDimension // 2, encodedDimension, bias=True),
+                                                nn.BatchNorm1d(encodedDimension))
+            self.deBox = nn.Sequential(
+                nn.Linear(encodedDimension * 2, self.channels * self.encoderHeight * self.encoderWidth),
+                nn.BatchNorm1d(self.channels * self.encoderHeight * self.encoderWidth))
+        else:
+            self.deBox = nn.Sequential(
+                nn.Linear(encodedDimension, self.channels * self.encoderHeight * self.encoderWidth),
+                nn.BatchNorm1d(self.channels * self.encoderHeight * self.encoderWidth))
+        self.concatDimension = encodedDimension
+        ### 24
+        self.upSample1 = GBlock(self.channels, 8 * ch, if_classBN=if_add_plate_infor, concatEmbeddingSize=self.concatDimension)
+        self.medium1 = nn.Sequential(
+            ConvBlock(8 * ch, 8 * ch, 3, 2, 0.0),
+            DeformConv2d(8 * ch, 8 * ch),
+            nn.BatchNorm2d(8 * ch, eps=1e-3, momentum=1 - 0.99),
+            Bottleneck(8 * ch, 8 * ch))
+        ### 48
+        self.upSample2 = GBlock(8 * ch , 4 * ch, if_classBN=if_add_plate_infor, concatEmbeddingSize=self.concatDimension)
+        self.medium2 = nn.Sequential(
+            Bottleneck(4 * ch, 4 * ch),
+            DeformConv2d(4 * ch, 4 * ch),
+            nn.BatchNorm2d(4 * ch, eps=1e-3, momentum=1 - 0.99),
+            ConvBlock(4 * ch, 4 * ch, 3, 2, 0.0),
+        )
+        ### 96
+        self.upSample3 = GBlock(4 * ch, 2 * ch, if_classBN=if_add_plate_infor, concatEmbeddingSize=self.concatDimension)
+        self.medium3 = nn.Sequential(
+            Bottleneck(2 * ch, 2 * ch),
+            ConvBlock(2*ch, 2*ch, 3, 2, 0.0))
         ###
-        self.upSample1 = UpSampling(self.channels, 96 ,kernel_size=4, stride=2, padding=1)
-        ###
-        self.upSample2 = UpSampling(96, 64, kernel_size=4, stride=2, padding=1)
-        ###
-        self.upSample3 = UpSampling(64, 56, kernel_size=4, stride=2, padding=1)
-        ###
-        self.upSample4 = UpSampling(56, 48, kernel_size=4, stride=2, padding=1)
-        ###
-        self.imageConv = nn.Sequential(nn.Conv2d(48, 64, kernel_size=3, stride=1, padding=1, bias=False),
-                                       nn.BatchNorm2d(64),
-                                       nn.Conv2d(64, 3, kernel_size=3, stride=1, padding=1))
+        self.imageConv = nn.Sequential(
+            nn.Conv2d(2*ch, 2*ch, 3, 1, 1),
+            nn.BatchNorm2d(2 * ch, eps=1e-3, momentum=1-0.99),
+            nn.Conv2d(2 * ch, 3, kernel_size=1, stride=1, padding=0))
 
-    def forward(self,inputs):
-        upChannels = self.upChannels(inputs)
-        upChannels = torch.reshape(upChannels, [-1, self.channels, 8, 32])
-        up2 = self.upSample1(upChannels)
-        up3 = self.upSample2(up2)
-        up4 = self.upSample3(up3)
-        up5 = self.upSample4(up4)
-        return self.imageConv(up5)
+    def forward(self,imgEncoded, platesInfor = None):
+        if platesInfor is None:
+            linear = self.deBox(imgEncoded)
+            linear = torch.reshape(linear, shape=[-1, self.channels, self.encoderHeight, self.encoderWidth])
+            up1 = self.upSample1(linear, None)
+            medium1 = self.medium1(up1)
+            up2 = self.upSample2(medium1, None)
+            medium2 = self.medium2(up2)
+            up3 = self.upSample3(medium2, None)
+            medium3 = self.medium3(up3)
+        else:
+            #print("Add plate infor.")
+            platesEmbedding = self.embeddingPlate(platesInfor)
+            linear = self.deBox(torch.cat([imgEncoded, platesEmbedding], dim=-1))
+            linear = torch.reshape(linear, shape=[-1, self.channels, self.encoderHeight, self.encoderWidth])
+            up1 = self.upSample1(linear, platesEmbedding)
+            medium1 = self.medium1(up1)
+            up2 = self.upSample2(medium1, platesEmbedding)
+            medium2 = self.medium2(up2)
+            up3 = self.upSample3(medium2, platesEmbedding)
+            medium3 = self.medium3(up3)
+        return self.imageConv(medium3)
 
+if __name__ == "__main__":
+    testPlates = torch.randn(size=[5,1])
+    testEncode = torch.randn(size=[5, 128])
+    testModule = Decoder(128,if_add_plate_infor = False)
+    print(testModule(testEncode, testPlates).shape)
 
